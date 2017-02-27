@@ -164,7 +164,229 @@ local loadCSV = function(fname, offset)
   return data
 end
 
+local convDate = function(dstr)
+  return dstr:sub(9,10).."/"..dstr:sub(6,7).."/"..dstr:sub(1,4)
+end
+
+local convDuration = function(tstr)
+  -- log("tstr: ", tstr)
+  local nhs = tonumber(tstr:sub(1,2))
+  local nmins = tonumber(tstr:sub(4,5))
+  local nsecs = tonumber(tstr:sub(7,8))
+
+  -- Return total number of seconds:
+  return nhs*3600+nmins*60+nsecs
+end
+
+-- helper method used to load toggl entries
+local loadTogglEntries = function(fname)
+  local data = loadCSV(fname, 1)
+
+  local entries = {}
+
+  local num = #data;
+
+  for i=1,num do
+    local entry = {}
+    entry.user = data[i][1]
+    entry.client = data[i][3]
+    entry.project = data[i][4]
+    entry.task = data[i][5]
+    entry.desc = data[i][6]
+    entry.date = convDate(data[i][8])
+    entry.duration = convDuration(data[i][12])
+    entry.tags = data[i][13]
+
+    table.insert(entries, entry)
+  end
+
+  return entries
+end
+
+-- Method used to append navision entries 
+-- Applying project collapsing in the process if applicable:
+local addNaviEntry = function(list, ent)
+  local num = #list
+  for i=1,num do 
+    if(list[i].date == ent.date and list[i].job == ent.job and list[i].phase == ent.phase) then
+      -- we should collapse this entry, so we just add the time:
+      list[i].duration = list[i].duration + ent.duration
+      return;
+    end
+  end
+
+  -- Could not collapse the entry so we append it:
+  table.insert(list, ent)
+end
+
+-- Method used to round the navision durations:
+local roundDuration = function(dur)
+  -- Compute the number of quarter of hours ceiled:
+  local nq = math.ceil(dur/(60*15));
+
+  -- Compute the number of hours and return this:
+  return nq/4
+end
+
+-- Function used to round times:
+local roundWorkDuration = function(list, cfg)
+  local num = #list
+  for i=1,num do
+    list[i].duration = roundDuration(list[i].duration)
+  end
+end
+
+-- Get the first date on the given entries:
+local getStartTime = function(list)
+  local num = #list
+  local tval = nil
+  for i=1,num do
+    local d = list[i].date
+    local val = os.time{year=d:sub(7,10), month=d:sub(4,5), day=d:sub(1,2)}
+    if(tval==nil or val<tval) then
+      tval = val
+    end
+  end
+
+  return tval
+end
+
+-- Get the last date on the given entries:
+local getEndTime = function(list)
+  local num = #list
+  local tval = nil
+  for i=1,num do
+    local d = list[i].date
+    local val = os.time{year=d:sub(7,10), month=d:sub(4,5), day=d:sub(1,2)}
+    if(tval==nil or val>tval) then
+      tval = val
+    end
+  end
+
+  return tval
+end
+
+-- Return all the entries corresponding to a given day:
+local getDayEntries = function(list, day)
+  local res = {}
+  local num = #list
+  for i=1,num do
+    if(list[i].date == day) then
+      table.insert(res, list[i])
+    end
+  end
+
+  return res;
+end
+
+-- Get the total number of worked hours in a given list:
+local getTotalWorkDuration = function(list)
+  local total = 0;
+  local num = #list
+  for i=1,num do
+    total = total + list[i].duration
+  end
+
+  return total
+end
+
+-- function used to convert from toggl entries to navision entries:
+local togglToNavi = function(entries, cfg)
+  local res = {}
+  local num = #entries
+  for i=1,num do 
+    local ent = {}
+    ent.date = entries[i].date
+    ent.duration = entries[i].duration
+    ent.job = cfg.jobFunc(entries[i])
+    ent.phase = cfg.phaseFunc(entries[i], ent.job)
+
+    addNaviEntry(res, ent)
+  end
+
+  roundWorkDuration(res, cfg)
+
+  -- Get the first day:
+  local startTime = getStartTime(res);
+  local endTime = getEndTime(res);
+
+  local final = {};
+
+  local ndays = (endTime-startTime)/(3600*24)
+  log("Number of days covered: ", ndays+1)
+
+  local dayTime = startTime;
+  local dayName = {
+    "Sunday", "Monday", "Tuesday","Wednesday", "Thursday", "Friday", "Saturday"
+  }
+  
+  -- Start from the start time and collect the required entries:
+  for nd=0,ndays do
+    -- get the date string:
+    local d = os.date("*t",dayTime)
+    if(d.wday~=1 and d.wday~=7) then
+      local dayStr = string.format("%02d/%02d/%04d", d.day, d.month,d.year)
+      log("Processing week day: ", dayStr, " (",dayName[d.wday],")")
+
+      local sublist = getDayEntries(res, dayStr)
+      for i=1,#sublist do
+        table.insert(final, sublist[i])
+      end
+
+      -- Get the total work duration for that day:
+      local workHours = getTotalWorkDuration(sublist)
+
+      if(workHours < cfg.work_hours) then
+        local compDur = cfg.work_hours - workHours
+        log("Adding compensation of ",compDur," hours on ", dayStr)
+        table.insert(final,{
+          date=dayStr,
+          duration=compDur,
+          job="XABPDPA-GER",
+          phase="COMPENSATE"
+        })
+      end
+    end
+
+    dayTime = dayTime + 3600*24
+  end
+
+  return final
+end
+
+-- Method used to write navision entries to output csv file
+local writeNaviEntries = function(entries, cfg)
+  -- First check if we should backup into the archive file
+  if(cfg.archive_csv) then
+    -- Read the content of the output csv file:
+  
+    local f = io.open(cfg.output_csv, "r")
+    local str = f:read("*a")
+    f:close();
+    if(str~="") then
+      log("Archiving previous entries...")
+      f = io.open(cfg.archive_csv, "a")
+      f:write(str)
+      f:close();
+    end
+
+    local f = io.open(cfg.output_csv, "w")
+
+    local num = #entries
+    for i=1,num do
+      -- Write each entry line by line:
+      local ent = entries[i]
+      local tt = {ent.date, ent.duration, ent.job, ent.phase}
+      f:write(table.concat(tt,";") .."\n")
+    end
+    f:close()
+  end
+end
+
 return {
-  loadCSV = loadCSV
+  loadCSV = loadCSV,
+  loadTogglEntries = loadTogglEntries,
+  togglToNavi = togglToNavi,
+  writeNaviEntries = writeNaviEntries
 }
 

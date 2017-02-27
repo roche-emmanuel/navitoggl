@@ -8,5 +8,27 @@ return {
   output_csv = "D:/Cloud/Documents/Famille/Travail/Manu/Administratif/TimeReports/Navision/current_entries.csv",
 
   -- Before overriding the content of the output_csv, this content is appended to the archive_csv file if any (this can be null)
-  archive_csv = "D:/Cloud/Documents/Famille/Travail/Manu/Administratif/TimeReports/Navision/entries_2017.csv"
+  archive_csv = "D:/Cloud/Documents/Famille/Travail/Manu/Administratif/TimeReports/Navision/entries_2017.csv",
+
+  -- Number of work hours per day (will introduce compensations if needed)
+  work_hours = 7,
+
+  -- Function used to convert from toggl entry to Navision Job:
+  jobFunc = function(entry)
+    return "WESCAM_IMP";
+  end,
+
+  -- Function used to convert from toggl entry to Navision Phase (also given the value 
+  -- of the job name)
+  phaseFunc = function(entry, job)
+    if(job=="WESCAM_IMP") then
+      return "CU"
+    end
+    if(job=="XABPDPA-GER") then
+      return "COMPENSATE"
+    end
+    if(job=="XVACAC") then
+      return "VAC"
+    end
+  end
 }
